@@ -79,6 +79,14 @@ class GenerationHourly(Base):
     value_mw = Column(Numeric, nullable=False)
 
 
+class CapacityHourly(Base):
+    """Kaynak bazında Emre Amade Kapasite (EAK) — 'kurulu güç' kartı için kullanılır."""
+    __tablename__ = "capacity_hourly"
+    dt = Column(DateTime(timezone=True), primary_key=True)
+    source = Column(String, primary_key=True)
+    value_mw = Column(Numeric, nullable=False)
+
+
 class EtlState(Base):
     """Tek seferlik işlerin (ör. yıllık geçmiş verinin ilk doldurulması) durumunu tutar."""
     __tablename__ = "etl_state"
@@ -131,6 +139,21 @@ def upsert_generation(rows: list[dict]):
         return 0
     with SessionLocal() as session:
         stmt = pg_insert(GenerationHourly).values(rows)
+        stmt = stmt.on_conflict_do_update(
+            index_elements=["dt", "source"],
+            set_={"value_mw": stmt.excluded.value_mw},
+        )
+        session.execute(stmt)
+        session.commit()
+    return len(rows)
+
+
+def upsert_capacity(rows: list[dict]):
+    """rows: [{"dt":..., "source":..., "value_mw":...}, ...]"""
+    if not rows:
+        return 0
+    with SessionLocal() as session:
+        stmt = pg_insert(CapacityHourly).values(rows)
         stmt = stmt.on_conflict_do_update(
             index_elements=["dt", "source"],
             set_={"value_mw": stmt.excluded.value_mw},

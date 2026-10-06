@@ -28,8 +28,10 @@ from config import (
     FAST_REFRESH_SOURCES,
     GENERATION_CALL,
     GENERATION_TABLE,
+    CAPACITY_CALL,
+    CAPACITY_TABLE,
 )
-from db import init_db, upsert_hourly, upsert_production, upsert_generation, get_state, set_state
+from db import init_db, upsert_hourly, upsert_production, upsert_generation, upsert_capacity, get_state, set_state
 from etl.fetch import get_client, fetch_series, fetch_production_plan, fetch_generation_mix
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -61,6 +63,13 @@ def run():
         log.info("  %-12s -> %-20s : %d satır", "generation", GENERATION_TABLE, n)
     except Exception as e:
         log.error("  generation BAŞARISIZ: %s", e)
+
+    try:
+        rows = fetch_generation_mix(eptr, CAPACITY_CALL, start_s, end_s)
+        n = upsert_capacity(rows)
+        log.info("  %-12s -> %-20s : %d satır", "capacity", CAPACITY_TABLE, n)
+    except Exception as e:
+        log.error("  capacity BAŞARISIZ: %s", e)
 
     for plant_name, uevcb_id in TRACKED_PLANTS.items():
         try:

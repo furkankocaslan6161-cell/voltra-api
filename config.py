@@ -46,6 +46,14 @@ FAST_REFRESH_SOURCES = ["ptf", "smf"]
 GENERATION_CALL = "rt-gen"
 GENERATION_TABLE = "generation_hourly"
 
+# "Kurulu güç" kartı için: EPİAŞ'ın gerçek zamanlı API'sinde kaynak bazında
+# statik/lisanslı kurulu güç raporu yok; en yakın ve kaynak bazında kırılımı
+# olan veri "Emre Amade Kapasite" (EAK) — sisteme o an sağlanabilecek aktif
+# kapasite. eptr2'deki servis adı "eak". Aynı fetch_generation_mix
+# fonksiyonuyla (tarih dışındaki her sütunu bir kaynak olarak) işlenir.
+CAPACITY_CALL = "eak"
+CAPACITY_TABLE = "capacity_hourly"
+
 # Santral üretim tahmini/gerçekleşen üretim (KGÜP/UEVM) için UEVCB kimliklerinizi
 # EPİAŞ Şeffaflık Platformu'nda "Santral Listesi" servisinden bulup buraya ekleyin.
 # Örnek: {"BOZCAADA RES": 3204384}
