@@ -1,0 +1,94 @@
+"""
+Voltra ETL — veritabanı katmanı.
+
+Basit, zaman serisi odaklı bir şema kullanıyoruz: her tablo (dt, value) çifti
+tutar ve dt üzerinde birincil anahtar + upsert yapılır, böylece EPİAŞ verisini
+revize edilmiş haliyle yeniden çektiğinizde satırlar güncellenir, çoğalmaz.
+
+Gerçek kullanımda TimescaleDB uzantısını (Postgres üstüne) kurup her tabloyu
+bir "hypertable"a çevirmeniz, büyüyen zaman serisi verisinde sorgu
+performansını ciddi şekilde artırır — kurulum notu README'de.
+"""
+
+from __future__ import annotations
+from datetime import datetime
+from sqlalchemy import create_engine, Column, DateTime, Numeric, String, text
+from sqlalchemy.orm import declarative_base, sessionmaker
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+from config import DATABASE_URL
+
+engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+SessionLocal = sessionmaker(bind=engine)
+Base = declarative_base()
+
+
+def _hourly_table(name: str):
+    """(dt, value) şemasında bir tablo sınıfı üretir."""
+    attrs = {
+        "__tablename__": name,
+        "dt": Column(DateTime(timezone=True), primary_key=True),
+        "value": Column(Numeric, nullable=False),
+    }
+    return type(name.title().replace("_", ""), (Base,), attrs)
+
+
+PtfHourly = _hourly_table("ptf_hourly")
+SmfHourly = _hourly_table("smf_hourly")
+ConsumptionHourly = _hourly_table("consumption_hourly")
+LoadPlanHourly = _hourly_table("load_plan_hourly")
+
+TABLE_MODELS = {
+    "ptf_hourly": PtfHourly,
+    "smf_hourly": SmfHourly,
+    "consumption_hourly": ConsumptionHourly,
+    "load_plan_hourly": LoadPlanHourly,
+}
+
+
+class ProductionPlan(Base):
+    """Santral bazlı üretim planı/gerçekleşen üretim (KGÜP/UEVM)."""
+    __tablename__ = "production_hourly"
+    dt = Column(DateTime(timezone=True), primary_key=True)
+    uevcb_id = Column(String, primary_key=True)
+    plan_mw = Column(Numeric)
+    actual_mw = Column(Numeric)
+
+
+def init_db():
+    """Tabloları oluşturur (idempotent — zaten varsa dokunmaz)."""
+    Base.metadata.create_all(engine)
+
+
+def upsert_hourly(table_name: str, rows: list[dict]):
+    """
+    rows: [{"dt": datetime, "value": float}, ...]
+    dt çakışırsa value günceller (EPİAŞ verisi revize edildiğinde önemli).
+    """
+    if not rows:
+        return 0
+    model = TABLE_MODELS[table_name]
+    with SessionLocal() as session:
+        stmt = pg_insert(model).values(rows)
+        stmt = stmt.on_conflict_do_update(
+            index_elements=["dt"],
+            set_={"value": stmt.excluded.value},
+        )
+        session.execute(stmt)
+        session.commit()
+    return len(rows)
+
+
+def upsert_production(rows: list[dict]):
+    """rows: [{"dt":..., "uevcb_id":..., "plan_mw":..., "actual_mw":...}, ...]"""
+    if not rows:
+        return 0
+    with SessionLocal() as session:
+        stmt = pg_insert(ProductionPlan).values(rows)
+        stmt = stmt.on_conflict_do_update(
+            index_elements=["dt", "uevcb_id"],
+            set_={"plan_mw": stmt.excluded.plan_mw, "actual_mw": stmt.excluded.actual_mw},
+        )
+        session.execute(stmt)
+        session.commit()
+    return len(rows)

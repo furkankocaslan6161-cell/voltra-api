@@ -1,0 +1,14 @@
+# EPİAŞ Şeffaflık Platformu istemcisi (resmi olmayan, aktif geliştirilen açık kaynak paket)
+eptr2[allextras]
+
+# Veritabanı
+SQLAlchemy>=2.0
+psycopg2-binary
+python-dotenv
+
+# API (frontend'e veri sunmak için)
+fastapi
+uvicorn[standard]
+
+# Zamanlama (cron kullanmak istemezseniz)
+APScheduler
