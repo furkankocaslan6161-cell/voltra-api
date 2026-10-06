@@ -3,7 +3,7 @@ eptr2[allextras]
 
 # Veritabanı
 SQLAlchemy>=2.0
-psycopg2-binary
+pg8000
 python-dotenv
 
 # API (frontend'e veri sunmak için)
