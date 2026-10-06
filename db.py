@@ -18,7 +18,16 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from config import DATABASE_URL
 
-engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+
+def _normalize_db_url(url: str) -> str:
+    if url.startswith("postgresql+psycopg2://"):
+        return url.replace("postgresql+psycopg2://", "postgresql+pg8000://", 1)
+    if url.startswith("postgresql://"):
+        return url.replace("postgresql://", "postgresql+pg8000://", 1)
+    return url
+
+
+engine = create_engine(_normalize_db_url(DATABASE_URL), pool_pre_ping=True)
 SessionLocal = sessionmaker(bind=engine)
 Base = declarative_base()
 
