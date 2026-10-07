@@ -12,3 +12,4 @@ uvicorn[standard]
 
 # Zamanlama (cron kullanmak istemezseniz)
 APScheduler
+tzdata

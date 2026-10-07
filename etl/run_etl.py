@@ -16,7 +16,7 @@ tekrar çekilen günler veritabanında çoğalmaz, sadece güncellenir.
 from __future__ import annotations
 import sys
 import logging
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 sys.path.append(".")  # etl/ altından da çalıştırılabilsin diye
 
@@ -30,12 +30,21 @@ from config import (
     GENERATION_TABLE,
     CAPACITY_CALL,
     CAPACITY_TABLE,
+    CAPACITY_LOOKBACK_MONTHS,
 )
 from db import init_db, upsert_hourly, upsert_production, upsert_generation, upsert_capacity, get_state, set_state
-from etl.fetch import get_client, fetch_series, fetch_production_plan, fetch_generation_mix
+from etl.fetch import get_client, fetch_series, fetch_production_plan, fetch_generation_mix, fetch_installed_capacity
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("voltra-etl")
+
+# Türkiye kalıcı olarak UTC+3. Sunucu UTC'de çalıştığı için "bugün" hesabını
+# İstanbul saatine göre yapıyoruz (aksi halde 00:00-03:00 arası yanlış gün çekilir).
+TR_TZ = timezone(timedelta(hours=3))
+
+
+def today_tr() -> date:
+    return datetime.now(TR_TZ).date()
 
 
 def run():
@@ -44,7 +53,7 @@ def run():
     init_db()
     eptr = get_client()
 
-    end = date.today()
+    end = today_tr()
     start = end - timedelta(days=ETL_LOOKBACK_DAYS)
     start_s, end_s = start.isoformat(), end.isoformat()
     log.info("ETL çalışıyor: %s -> %s", start_s, end_s)
@@ -64,12 +73,7 @@ def run():
     except Exception as e:
         log.error("  generation BAŞARISIZ: %s", e)
 
-    try:
-        rows = fetch_generation_mix(eptr, CAPACITY_CALL, start_s, end_s)
-        n = upsert_capacity(rows)
-        log.info("  %-12s -> %-20s : %d satır", "capacity", CAPACITY_TABLE, n)
-    except Exception as e:
-        log.error("  capacity BAŞARISIZ: %s", e)
+    _refresh_installed_capacity(eptr)
 
     for plant_name, uevcb_id in TRACKED_PLANTS.items():
         try:
@@ -84,6 +88,34 @@ def run():
     log.info("ETL tamamlandı.")
 
 
+def _refresh_installed_capacity(eptr):
+    """
+    Kurulu güç raporu aylık yayımlanır; günde bir kez en güncel dönemi çekmek yeterli.
+    Başarısız olursa bayrak konmaz, bir sonraki saatlik turda tekrar denenir.
+    """
+    today_s = today_tr().isoformat()
+    if get_state("capacity_checked") == today_s:
+        return
+    first = today_tr().replace(day=1)
+    periods = []
+    y, m = first.year, first.month
+    for _ in range(CAPACITY_LOOKBACK_MONTHS):
+        periods.append(date(y, m, 1))
+        m -= 1
+        if m == 0:
+            y, m = y - 1, 12
+    try:
+        rows = fetch_installed_capacity(eptr, CAPACITY_CALL, periods)
+        if rows:
+            n = upsert_capacity(rows)
+            set_state("capacity_checked", today_s)
+            log.info("  %-12s -> %-20s : %d satır (dönem %s)", "kurulu güç", CAPACITY_TABLE, n, rows[0]["dt"].strftime("%Y-%m"))
+        else:
+            log.warning("  kurulu güç: son %d ay için veri bulunamadı", CAPACITY_LOOKBACK_MONTHS)
+    except Exception as e:
+        log.error("  kurulu güç BAŞARISIZ: %s", e)
+
+
 def _backfill_annual_once(eptr):
     """
     "Yıllık PTF/SMF" grafiği için son ANNUAL_BACKFILL_DAYS günü BİR KEZ doldurur.
@@ -93,7 +125,7 @@ def _backfill_annual_once(eptr):
     if get_state("annual_backfill_done") == "1":
         return
     log.info("Yıllık PTF/SMF geçmişi ilk kez dolduruluyor (%d gün) — bu birkaç dakika sürebilir...", ANNUAL_BACKFILL_DAYS)
-    end = date.today()
+    end = today_tr()
     start = end - timedelta(days=ANNUAL_BACKFILL_DAYS)
     chunk_days = 60
     cursor = start
@@ -121,7 +153,7 @@ def run_fast_refresh():
     """
     init_db()
     eptr = get_client()
-    today_s = date.today().isoformat()
+    today_s = today_tr().isoformat()
 
     for name in FAST_REFRESH_SOURCES:
         cfg = DATA_SOURCES[name]

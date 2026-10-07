@@ -79,9 +79,12 @@ class GenerationHourly(Base):
     value_mw = Column(Numeric, nullable=False)
 
 
-class CapacityHourly(Base):
-    """Kaynak bazında Emre Amade Kapasite (EAK) — 'kurulu güç' kartı için kullanılır."""
-    __tablename__ = "capacity_hourly"
+class InstalledCapacity(Base):
+    """
+    Kaynak bazında KURULU GÜÇ (MW) — EPİAŞ Şeffaflık Platformu "Kurulu Güç" raporu.
+    dt: raporun ait olduğu dönem (ayın ilk günü), source: kaynak adı.
+    """
+    __tablename__ = "installed_capacity"
     dt = Column(DateTime(timezone=True), primary_key=True)
     source = Column(String, primary_key=True)
     value_mw = Column(Numeric, nullable=False)
@@ -153,7 +156,7 @@ def upsert_capacity(rows: list[dict]):
     if not rows:
         return 0
     with SessionLocal() as session:
-        stmt = pg_insert(CapacityHourly).values(rows)
+        stmt = pg_insert(InstalledCapacity).values(rows)
         stmt = stmt.on_conflict_do_update(
             index_elements=["dt", "source"],
             set_={"value_mw": stmt.excluded.value_mw},
