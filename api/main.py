@@ -23,7 +23,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import select, func
 from apscheduler.schedulers.background import BackgroundScheduler
 
-from db import SessionLocal, TABLE_MODELS, GenerationHourly, InstalledCapacity, PtfHourly, SmfHourly, init_db
+from db import get_state, SessionLocal, TABLE_MODELS, GenerationHourly, InstalledCapacity, PtfHourly, SmfHourly, init_db
 
 log = logging.getLogger("voltra-api")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -101,6 +101,11 @@ def _run_fast_refresh_safely():
 @app.on_event("startup")
 def on_startup():
     init_db()
+    try:
+        from capacity_snapshot import seed_installed_capacity
+        seed_installed_capacity()
+    except Exception:
+        log.exception("Kurulu güç anlık görüntüsü yazılamadı")
     # İlk veriyi hemen çek (sunucunun açılışını bloklamasın diye arka planda).
     threading.Thread(target=_run_etl_safely, daemon=True).start()
     # Tam ETL (üretim planı + geçmiş günler) saatte bir.
@@ -241,7 +246,11 @@ def capacity_latest():
         rows = session.execute(
             select(InstalledCapacity.source, InstalledCapacity.value_mw).where(InstalledCapacity.dt == latest_dt)
         ).all()
-    return {"period": _tr(latest_dt).strftime("%Y-%m"), "mix": {r.source: float(r.value_mw) for r in rows}}
+    return {
+        "period": _tr(latest_dt).strftime("%Y-%m"),
+        "note": get_state("capacity_note"),
+        "mix": {r.source: float(r.value_mw) for r in rows},
+    }
 
 
 @app.get("/ptf/hourly-profile")

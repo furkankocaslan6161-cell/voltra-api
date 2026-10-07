@@ -14,6 +14,7 @@ tekrar çekilen günler veritabanında çoğalmaz, sadece güncellenir.
 """
 
 from __future__ import annotations
+import os
 import sys
 import logging
 from datetime import date, datetime, timedelta, timezone
@@ -93,6 +94,11 @@ def _refresh_installed_capacity(eptr):
     Kurulu güç raporu aylık yayımlanır; günde bir kez en güncel dönemi çekmek yeterli.
     Başarısız olursa bayrak konmaz, bir sonraki saatlik turda tekrar denenir.
     """
+    # EPİAŞ'ın genel kurulu güç servisi canlıda kapalı (ERR-006); kart resmi aylık
+    # anlık görüntüyle (capacity_snapshot.py) beslenir. Servis açılırsa
+    # CAPACITY_TRY_EPIAS=1 ile bu yol yeniden etkinleştirilebilir.
+    if os.getenv("CAPACITY_TRY_EPIAS") != "1":
+        return
     today_s = today_tr().isoformat()
     if get_state("capacity_checked") == today_s:
         return
