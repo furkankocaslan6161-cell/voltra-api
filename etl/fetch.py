@@ -13,11 +13,14 @@ bırakılmış tek "kontrol edin" noktasıdır — geri kalan her şey çalış�
 
 from __future__ import annotations
 import logging
+import os
+import re
 import threading
 import time
 from datetime import date
 
 import pandas as pd
+import requests
 from eptr2 import EPTR2
 
 log = logging.getLogger("voltra-etl")
@@ -169,13 +172,83 @@ def _capacity_rows_from_frame(df: pd.DataFrame, period: date) -> list[dict]:
     return rows
 
 
+# --- EPİAŞ REST (eptr2'de "installed-capacity" çağrısı tanımlı değilse yedek yol) ---
+EPIAS_CAS_URL = "https://giris.epias.com.tr/cas/v1/tickets"
+EPIAS_API_BASE = "https://seffaflik.epias.com.tr/electricity-service"
+CAPACITY_REST_PATHS = ["/v1/generation/data/installed-capacity"]
+_capacity_discovery_logged = False
+
+
+def _log_capacity_discovery(eptr: EPTR2) -> bool:
+    """eptr2 sürümünü ve kurulu güçle ilgili tanımlı çağrıları bir kez loglar. Çağrı varsa True döner."""
+    global _capacity_discovery_logged
+    try:
+        names = [str(n) for n in eptr.get_available_calls()]
+    except Exception as e:
+        names = []
+        if not _capacity_discovery_logged:
+            log.info("  eptr2 çağrı listesi alınamadı: %s", e)
+    if not _capacity_discovery_logged:
+        _capacity_discovery_logged = True
+        try:
+            from importlib.metadata import version
+            ver = version("eptr2")
+        except Exception:
+            ver = "?"
+        related = [n for n in names if any(k in n.lower() for k in ("install", "capacity", "kurulu", "pp-list"))]
+        log.info("  eptr2 sürümü=%s, kurulu güçle ilgili tanımlı çağrılar=%s", ver, related)
+    return "installed-capacity" in names
+
+
+def _get_tgt(eptr: EPTR2) -> str:
+    """Mevcut istemcinin giriş biletini (TGT) bulur; yoksa CAS üzerinden bir kez giriş yapar."""
+    for v in list(vars(eptr).values()):
+        if isinstance(v, str) and v.startswith("TGT-"):
+            return v
+    user, pw = os.getenv("EPTR_USERNAME"), os.getenv("EPTR_PASSWORD")
+    r = requests.post(
+        EPIAS_CAS_URL, data={"username": user, "password": pw},
+        headers={"Content-Type": "application/x-www-form-urlencoded", "Accept": "text/plain"}, timeout=30,
+    )
+    m = re.search(r"TGT-[\w\-\.]+", r.text or "")
+    if r.status_code in (200, 201) and m:
+        return m.group(0)
+    raise RuntimeError(f"EPİAŞ girişi başarısız: HTTP {r.status_code} {(r.text or '')[:200]}")
+
+
+def _rest_installed_capacity(eptr: EPTR2, period: date) -> list[dict]:
+    tgt = _get_tgt(eptr)
+    headers = {"TGT": tgt, "Content-Type": "application/json", "Accept": "application/json"}
+    stamp = f"{period.isoformat()}T00:00:00+03:00"
+    bodies = [{"period": stamp}, {"startDate": stamp, "endDate": stamp}]
+    for path in CAPACITY_REST_PATHS:
+        for body in bodies:
+            r = requests.post(EPIAS_API_BASE + path, json=body, headers=headers, timeout=60)
+            log.info("  kurulu güç REST %s %s -> HTTP %s %s", path, list(body), r.status_code, (r.text or "")[:300].replace("\n", " "))
+            if r.status_code in (404, 405):
+                raise RuntimeError(f"Kurulu güç servis adresi bulunamadı: {path} (HTTP {r.status_code})")
+            if r.status_code != 200:
+                continue
+            data = r.json()
+            items = data.get("items") if isinstance(data, dict) else data
+            if not items and isinstance(data, dict):
+                items = next((v for v in data.values() if isinstance(v, list) and v), None)
+            if not items:
+                continue
+            rows = _capacity_rows_from_frame(pd.DataFrame(items), period)
+            if rows:
+                return rows
+    return []
+
+
 def fetch_installed_capacity(eptr: EPTR2, call_name: str, periods: list[date]) -> list[dict]:
     """
-    EPİAŞ "Kurulu Güç" raporunu çeker. `periods` en yeniden eskiye sıralı ay
-    başları; ilk veri dolu olan dönem kullanılır. Servisin parametre adı
-    sürüme göre değişebildiği için (period / start_date+end_date) iki biçim denenir.
+    EPİAŞ "Kurulu Güç" raporunu çeker. `periods` en yeniden eskiye sıralı ay başları;
+    ilk veri dolu olan dönem kullanılır. eptr2'de çağrı tanımlıysa onu, değilse
+    doğrudan EPİAŞ REST servisini kullanır.
     """
     global _capacity_param_style
+    have_call = _log_capacity_discovery(eptr)
     styles = ["period", "range"]
     if _capacity_param_style in styles:
         styles.remove(_capacity_param_style)
@@ -184,20 +257,24 @@ def fetch_installed_capacity(eptr: EPTR2, call_name: str, periods: list[date]) -
     last_error: Exception | None = None
     for period in periods:
         iso = period.isoformat()
-        for style in styles:
-            kwargs = {"period": iso} if style == "period" else {"start_date": iso, "end_date": iso}
-            try:
-                df = _call(eptr, call_name, **kwargs)
-            except Exception as e:
-                last_error = e
-                log.info("  kurulu güç denemesi (%s, %s) başarısız: %s", style, iso, e)
-                continue
-            if df is None or len(df) == 0:
-                log.info("  kurulu güç (%s, %s) boş döndü", style, iso)
-                continue
-            rows = _capacity_rows_from_frame(df, period)
+        if have_call:
+            for style in styles:
+                kwargs = {"period": iso} if style == "period" else {"start_date": iso, "end_date": iso}
+                try:
+                    df = _call(eptr, call_name, **kwargs)
+                except Exception as e:
+                    last_error = e
+                    log.info("  kurulu güç denemesi (%s, %s) başarısız: %s", style, iso, e)
+                    continue
+                if df is None or len(df) == 0:
+                    continue
+                rows = _capacity_rows_from_frame(df, period)
+                if rows:
+                    _capacity_param_style = style
+                    return rows
+        else:
+            rows = _rest_installed_capacity(eptr, period)
             if rows:
-                _capacity_param_style = style
                 return rows
     if last_error is not None:
         raise last_error
