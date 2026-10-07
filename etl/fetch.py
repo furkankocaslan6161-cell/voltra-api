@@ -175,7 +175,12 @@ def _capacity_rows_from_frame(df: pd.DataFrame, period: date) -> list[dict]:
 # --- EPİAŞ REST (eptr2'de "installed-capacity" çağrısı tanımlı değilse yedek yol) ---
 EPIAS_CAS_URL = "https://giris.epias.com.tr/cas/v1/tickets"
 EPIAS_API_BASE = "https://seffaflik.epias.com.tr/electricity-service"
-CAPACITY_REST_PATHS = ["/v1/generation/data/installed-capacity"]
+# EPİAŞ teknik dokümanı (5.246 / 5.247): güncel dönemler için "-new", YEKDEM son
+# tarihi ve öncesi için "-old" servisi kullanılır. Önce "-new", boşsa "-old" denenir.
+CAPACITY_REST_PATHS = [
+    "/v1/generation/data/installed-capacity-new",
+    "/v1/generation/data/installed-capacity-old",
+]
 _capacity_discovery_logged = False
 
 
@@ -221,12 +226,14 @@ def _rest_installed_capacity(eptr: EPTR2, period: date) -> list[dict]:
     headers = {"TGT": tgt, "Content-Type": "application/json", "Accept": "application/json"}
     stamp = f"{period.isoformat()}T00:00:00+03:00"
     bodies = [{"period": stamp}, {"startDate": stamp, "endDate": stamp}]
+    not_found = 0
     for path in CAPACITY_REST_PATHS:
         for body in bodies:
             r = requests.post(EPIAS_API_BASE + path, json=body, headers=headers, timeout=60)
             log.info("  kurulu güç REST %s %s -> HTTP %s %s", path, list(body), r.status_code, (r.text or "")[:300].replace("\n", " "))
             if r.status_code in (404, 405):
-                raise RuntimeError(f"Kurulu güç servis adresi bulunamadı: {path} (HTTP {r.status_code})")
+                not_found += 1
+                break  # bu servis adresi yok; sıradaki adrese geç
             if r.status_code != 200:
                 continue
             data = r.json()
@@ -235,9 +242,11 @@ def _rest_installed_capacity(eptr: EPTR2, period: date) -> list[dict]:
                 items = next((v for v in data.values() if isinstance(v, list) and v), None)
             if not items:
                 continue
-            rows = _capacity_rows_from_frame(pd.DataFrame(items), period)
+            rows = _capacity_rows_from_frame(pd.json_normalize(items), period)
             if rows:
                 return rows
+    if not_found == len(CAPACITY_REST_PATHS):
+        raise RuntimeError("Kurulu güç servis adreslerinin hiçbiri bulunamadı (HTTP 404)")
     return []
 
 
